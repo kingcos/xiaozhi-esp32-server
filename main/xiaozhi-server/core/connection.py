@@ -19,9 +19,6 @@ from core.handle.sendAudioHandle import sendAudioMessage
 from core.handle.receiveAudioHandle import handleAudioMessage
 from core.handle.functionHandler import FunctionHandler
 from plugins_func.register import Action
-from config.private_config import PrivateConfig
-from core.auth import AuthMiddleware, AuthenticationError
-from core.utils.auth_code_gen import AuthCodeGenerator
 
 TAG = __name__
 
@@ -34,7 +31,6 @@ class ConnectionHandler:
     def __init__(self, config: Dict[str, Any], _vad, _asr, _llm, _tts, _memory, _intent):
         self.config = config
         self.logger = setup_logging()
-        self.auth = AuthMiddleware(config)
 
         self.websocket = None
         self.headers = None
@@ -91,9 +87,6 @@ class ConnectionHandler:
             if len(cmd) > self.max_cmd_length:
                 self.max_cmd_length = len(cmd)
 
-        self.private_config = None
-        self.auth_code_gen = AuthCodeGenerator.get_instance()
-        self.is_device_verified = False  # 添加设备验证状态标志
         self.close_after_chat = False  # 是否在聊天结束后关闭连接
         self.use_function_call_mode = False
         if self.config["selected_module"]["Intent"] == 'function_call':
@@ -107,39 +100,9 @@ class ConnectionHandler:
             self.client_ip = ws.remote_address[0]
             self.logger.bind(tag=TAG).info(f"{self.client_ip} conn - Headers: {self.headers}")
 
-            # 进行认证
-            await self.auth.authenticate(self.headers)
-
             device_id = self.headers.get("device-id", None)
             self.memory.init_memory(device_id, self.llm)
             self.intent.set_llm(self.llm)
-
-            # Load private configuration if device_id is provided
-            bUsePrivateConfig = self.config.get("use_private_config", False)
-            self.logger.bind(tag=TAG).info(f"bUsePrivateConfig: {bUsePrivateConfig}, device_id: {device_id}")
-            if bUsePrivateConfig and device_id:
-                try:
-                    self.private_config = PrivateConfig(device_id, self.config, self.auth_code_gen)
-                    await self.private_config.load_or_create()
-                    # 判断是否已经绑定
-                    owner = self.private_config.get_owner()
-                    self.is_device_verified = owner is not None
-
-                    if self.is_device_verified:
-                        await self.private_config.update_last_chat_time()
-
-                    llm, tts = self.private_config.create_private_instances()
-                    if all([llm, tts]):
-                        self.llm = llm
-                        self.tts = tts
-                        self.logger.bind(tag=TAG).info(f"Loaded private config and instances for device {device_id}")
-                    else:
-                        self.logger.bind(tag=TAG).error(f"Failed to create instances for device {device_id}")
-                        self.private_config = None
-                except Exception as e:
-                    self.logger.bind(tag=TAG).error(f"Error initializing private config: {e}")
-                    self.private_config = None
-                    raise
 
             # 认证通过,继续处理
             self.websocket = ws
@@ -167,10 +130,6 @@ class ConnectionHandler:
                 self.logger.bind(tag=TAG).info("客户端断开连接")
                 await self.close()
 
-        except AuthenticationError as e:
-            self.logger.bind(tag=TAG).error(f"Authentication failed: {str(e)}")
-            await ws.close()
-            return
         except Exception as e:
             stack_trace = traceback.format_exc()
             self.logger.bind(tag=TAG).error(f"Connection error: {str(e)}-{stack_trace}")
@@ -188,8 +147,6 @@ class ConnectionHandler:
 
     def _initialize_components(self):
         self.prompt = self.config["prompt"]
-        if self.private_config:
-            self.prompt = self.private_config.private_config.get("prompt", self.prompt)
 
         self.client_ip_info = get_ip_info(self.client_ip)
         self.logger.bind(tag=TAG).info(f"Client ip info: {self.client_ip_info}")
@@ -205,33 +162,7 @@ class ConnectionHandler:
             if m.role == "system":
                 m.content = prompt
 
-    async def _check_and_broadcast_auth_code(self):
-        """检查设备绑定状态并广播认证码"""
-        if not self.private_config.get_owner():
-            auth_code = self.private_config.get_auth_code()
-            if auth_code:
-                # 发送验证码语音提示
-                text = f"请在后台输入验证码：{' '.join(auth_code)}"
-                self.recode_first_last_text(text)
-                future = self.executor.submit(self.speak_and_play, text)
-                self.tts_queue.put(future)
-            return False
-        return True
-
-    def isNeedAuth(self):
-        bUsePrivateConfig = self.config.get("use_private_config", False)
-        if not bUsePrivateConfig:
-            # 如果不使用私有配置，就不需要验证
-            return False
-        return not self.is_device_verified
-
     def chat(self, query):
-        if self.isNeedAuth():
-            self.llm_finish_task = True
-            future = asyncio.run_coroutine_threadsafe(self._check_and_broadcast_auth_code(), self.loop)
-            future.result()
-            return True
-
         self.dialogue.put(Message(role="user", content=query))
 
         response_message = []
@@ -306,11 +237,6 @@ class ConnectionHandler:
     def chat_with_function_calling(self, query, tool_call=False):
         self.logger.bind(tag=TAG).debug(f"Chat with function calling start: {query}")
         """Chat with function calling for intent detection using streaming"""
-        if self.isNeedAuth():
-            self.llm_finish_task = True
-            future = asyncio.run_coroutine_threadsafe(self._check_and_broadcast_auth_code(), self.loop)
-            future.result()
-            return True
 
         if not tool_call:
             self.dialogue.put(Message(role="user", content=query))
