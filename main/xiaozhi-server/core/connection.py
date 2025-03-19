@@ -150,7 +150,8 @@ class ConnectionHandler:
 
         self.client_ip_info = get_ip_info(self.client_ip)
         self.logger.bind(tag=TAG).info(f"Client ip info: {self.client_ip_info}")
-        self.prompt = self.prompt + f"\n我在:{self.client_ip_info}"
+        # DEV: 增加根据用户 ip 的位置 prompt 补充
+        # self.prompt = self.prompt + f"\n我在:{self.client_ip_info}"
         self.dialogue.put(Message(role="system", content=self.prompt))
 
         self.func_handler = FunctionHandler(self.config)

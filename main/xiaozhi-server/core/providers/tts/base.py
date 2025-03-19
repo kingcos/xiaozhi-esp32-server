@@ -24,6 +24,7 @@ class TTSProviderBase(ABC):
         try:
             max_repeat_time = 5
             while not os.path.exists(tmp_file) and max_repeat_time > 0:
+                # DEV: TTS 接口调用
                 asyncio.run(self.text_to_speak(text, tmp_file))
                 if not os.path.exists(tmp_file):
                     max_repeat_time = max_repeat_time - 1
